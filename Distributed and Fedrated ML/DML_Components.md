@@ -1,5 +1,4 @@
 # Components of Distributed Machine Learning
-
 Distributed Machine Learning (DML) involves several key components to effectively distribute computation and manage large-scale data. Below is an overview of these components:
 
 ## 1. Data Distribution
