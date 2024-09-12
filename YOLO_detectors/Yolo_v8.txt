@@ -1,0 +1,43 @@
+YOLO detection  Models  
+Anchor boxes in the YOLO version 2 
+
+These are the boxes that are taken into the account when there are several overlapping boundary  boxes in the images  .If there are several object box and these are overlapping then the anchor boxes are taken into the account .
+
+In the anchor box we basically use the pre defined box  . These pre defined box have fixed shape and the size .
+There are multiple anchor boxes allowed in the YOLO version 2 and above  .\
+
+The anchor box can be narrow and wide .  The narrow have the width < Length while the wide are the one that are more escalated in the horizontal setting .
+Basically if there are object with overlapping boundary then directly we can use the anchor box . 
+
+What is the criteria of the overlapping anchor  boxes  ?
+In the case of  several anchor box overlapping then we compute the IOU(intersection over union) for each of the anchor box and  the anchor box with he max IOU is taken for the further computation .
+
+anchor box also have their own limitation  :
+1.If there are total 3 object and  we are using all in all 2 anchor box then computation is very much poor and not up to the mark .
+
+2.two object with thee same overlapping anchor box and the same centre point then that is also a huge overhead .
+ 
+It is worth noting that  the anchor box  computation is the part of the convo layer network , and these all are used in  the YOLO within the Convo layer which is the first step in the yolo computing  or the instantaneous object detection  computing . 
+
+Also the YOLO are the single phase algo  , The image is passed into the convo layer in the starting and further no more convo layer are involved . 
+These are single Convo layered neural network  .
+Backbone  is the grid  and the centre computation unlike the RCNN and the Fast RCNN  that uses the selective search algo  .
+
+All in all  in YOLO  , a single CNN simultaneously predicts multiple bounding boxes and class probabilities for those boxes.
+YOLO trains on full images and directly optimizes detection performance.
+
+Limitation of the yolo 3 :
+If there are several object  then the work for the Grouping is  a struggle for  the YOLO .
+
+what is the YOLO version 3 : 
+The YOLO version 3 is a network with 75 convo layer that include the up sampling and there is a real time object detection .
+
+The most important thing here is that different scale predication can be done with the help of the YOLO - 3 Model  .
+
+trade-off of the YOLO 3 :
+The object in the group is a big problem  , we cannot do the boundary box predication of the Objects in  the Group .
+Faster RCNN has the 2 network one is  :
+1.Proposal network
+2.Convo layer for the output generation 
+
+The best thing is that the FASTER RCNN works fine in the case of the Region proposal network  that is the faster computation and is used in the region and  the boundary box detection  .
