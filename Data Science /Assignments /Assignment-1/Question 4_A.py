@@ -1,21 +1,38 @@
 import pandas as pd
-from scipy.stats import pearsonr, t
-import numpy as np
-from scipy.stats import pearsonr, t, norm
-import numpy as np
-filepath ="/content/Assignment-1 - Hurricane.csv"
+alpha = 0.01
+path = "/content/Assignment-1 - Hurricane.csv"
+critical_values = {
+        0.001: 3.291,  
+        0.01: 2.626,   
+        0.025: 2.262,  
+        0.05: 2.085,   
+        0.10: 1.833,  
+        0.20: 1.645    
+    }
+
+x = df['Max. sustained winds(mph)']
+y = df['Minimum pressure(mbar)']
 
 def load_data_from_csv(filepath):
     return pd.read_csv(filepath)
 
-def p_compute(x, y):
-    return pearsonr(x, y)
+def compute_pearson_correlation(x, y):
+    n = len(x)
+    mean_x = sum(x) / n
+    mean_y = sum(y) / n
+    numerator = sum((xi - mean_x) * (yi - mean_y) for xi, yi in zip(x, y))
+    denominator_x = sum((xi - mean_x) ** 2 for xi in x)
+    denominator_y = sum((yi - mean_y) ** 2 for yi in y)
+    denominator = (denominator_x * denominator_y) ** 0.5
+    correlation = numerator / denominator
+    return correlation
 
-def t_statistics(r, n):
-    return r * np.sqrt((n - 2) / (1 - r**2))
+def compute_t_statistics(r, n):
+    result =  r * ((n - 2) / (1 - r ** 2)) ** 0.5
+    return result
 
 def get_critical_t_value(alpha, df):
-    return t.ppf(1 - alpha / 2, df)
+    return critical_values.get(alpha, 1.96)
 
 def printer():
     print("Hypotheses:")
@@ -23,49 +40,22 @@ def printer():
     print("Alternative Hypothesis (H1): There is a correlation between 'Max. sustained winds (mph)' and 'Minimum pressure (mbar)'. (ρ ≠ 0)")
 
 def run_correlation_t_test(df):
-    x = df['Max. sustained winds(mph)']
-    y = df['Minimum pressure(mbar)']
-    
-    r, _ = p_compute(x, y)
     n = len(x)
-    
-    t_statistic = t_statistics(r, n)
-    alpha = 0.01
+    r = compute_pearson_correlation(x, y)
+    t_statistic = compute_t_statistics(r, n)
     critical_t = get_critical_t_value(alpha, n - 2)
-    
     printer()
-    print(f'\nPearson correlation coefficient: {r:.4f}')
-    print(f'T-statistic: {t_statistic:.4f}')
-    print(f'Critical t-value for 1% significance level: {critical_t:.4f}')
-    
+    print(f'\nPearson correlation coefficient: {r:.8f}')
+    print(f'T-statistic: {t_statistic:.8f}')
+    print(f'Critical t-value for 1% significance level: {critical_t:.8f}')
+
     if abs(t_statistic) > critical_t:
         print("The correlation is statistically significant at the 1% level.")
     else:
         print("The correlation is not statistically significant at the 1% level.")
-    plot_t_distribution(t_statistic, critical_t, n - 2)
 
-def plot_t_distribution(t_statistic, critical_t, df):
-    x = np.linspace(-4, 4, 1000)
-    t_dist = t.pdf(x, df)
-    norm_dist = norm.pdf(x)
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(x, t_dist, label='T-distribution', color='blue')
-    plt.plot(x, norm_dist, label='Standard Normal Distribution', color='green', linestyle='--')
-    plt.fill_between(x, t_dist, where=(x >= critical_t) | (x <= -critical_t), color='red', alpha=0.3, label='Critical Region')
-    
-    plt.axvline(t_statistic, color='black', linestyle='--', label=f'T-Statistic ({t_statistic:.2f})')
-    plt.axvline(critical_t, color='red', linestyle=':', label=f'Critical T-value ({critical_t:.2f})')
-    plt.axvline(-critical_t, color='red', linestyle=':', label=f'Critical T-value ({-critical_t:.2f})')
-    
-    plt.title('T-Distribution with T-Statistic and Critical Region')
-    plt.xlabel('Value')
-    plt.ylabel('Probability Density')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-df = load_data_from_csv(filepath)
-run_correlation_t_test(df)
-
-print("part A is completed Sucessfully ")
+def main():
+    df = load_data_from_csv(path)
+    run_correlation_t_test(df)
+main()
+print("This is the part A of the question 4")
