@@ -1,5 +1,4 @@
 # Aircraft Algorithms
-
 ## Overview
 
 This repository contains a collection of algorithms specifically designed for various applications in the aviation industry. These algorithms enhance flight safety, optimize navigation, improve fuel efficiency, and facilitate predictive maintenance.
