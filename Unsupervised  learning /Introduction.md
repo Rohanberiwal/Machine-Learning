@@ -1,7 +1,5 @@
 # Unsupervised Machine Learning
-
 ## Introduction
-
 Unsupervised Machine Learning is a type of machine learning where the model is trained on data that has no labels or predefined categories. The goal is to uncover hidden patterns or structures within the data. Unlike supervised learning, unsupervised learning does not rely on labeled data to guide the learning process.
 
 ## Key Concepts
