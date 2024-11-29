@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torchvision.transforms as T
-
 class SwinTransformer(nn.Module):
     def __init__(self, img_size=224, patch_size=4, in_channels=3, num_classes=1000):
         super(SwinTransformer, self).__init__()
@@ -12,8 +11,6 @@ class SwinTransformer(nn.Module):
         self.transformer_blocks = nn.ModuleList([
             SwinTransformerBlock(dim=96, num_heads=3) for _ in range(12)
         ])
-        
-        # Classification head
         self.classifier = nn.Linear(96, num_classes)
     
     def forward(self, x):
@@ -27,7 +24,7 @@ class SwinTransformer(nn.Module):
 class SwinTransformerBlock(nn.Module):
     def __init__(self, dim, num_heads):
         super(SwinTransformerBlock, self).__init__()
-        # Multi-head self-attention layer
+        
         self.attention = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads)
         # Feed-forward network
         self.ffn = nn.Sequential(
