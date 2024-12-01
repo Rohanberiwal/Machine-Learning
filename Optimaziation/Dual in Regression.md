@@ -1,7 +1,6 @@
 # README: Understanding the Dual Problem in Regression
 
-## Overview
-
+## Overview 
 In regression problems, the **dual problem** can be a reformulation of the original **primal problem**. The dual problem often provides insights and computational advantages, particularly in high-dimensional spaces or when using regularization techniques. This README explains the dual problem in regression optimization.
 
 ## Primal Problem in Regression
