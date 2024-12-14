@@ -1,7 +1,6 @@
 # Distributed and Federated Machine Learning
 
 ## Introduction
-
 Distributed and Federated Machine Learning are approaches designed to handle large-scale data and computational tasks more efficiently, while also addressing privacy and data governance concerns.
 
 - **Distributed Machine Learning** involves distributing the training process across multiple machines or nodes to speed up computation and manage large datasets.
