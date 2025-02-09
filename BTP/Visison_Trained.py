@@ -25,7 +25,6 @@ from PIL import Image
 import os
 import numpy as np
 import cv2
-
 zip_file_path = "/content/Histopathology images.zip"
 extract_to = "/content/Histopathology_images_extracted"
 
