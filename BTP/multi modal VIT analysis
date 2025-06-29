@@ -1,0 +1,370 @@
+import os
+import nibabel as nib
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import gym
+from gym import spaces
+from collections import deque
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from scipy.stats import skew, kurtosis
+from skimage.feature import graycomatrix, graycoprops
+import random
+
+
+def compute_tumor_volumes(root_dir):
+    seg_paths = []
+    for root, _, files in os.walk(root_dir):
+        for file in files:
+            if file.endswith("seg.nii.gz"):
+                seg_paths.append(os.path.join(root, file))
+
+    volume_data = []
+    for path in tqdm(seg_paths, desc="Computing tumor volumes"):
+        img = nib.load(path)
+        data = img.get_fdata()
+        voxel_volume = np.prod(img.header.get_zooms())
+        tumor_voxels = np.sum(data > 0)
+        volume_mm3 = tumor_voxels * voxel_volume
+        patient_id = os.path.basename(os.path.dirname(path))
+        volume_data.append({"patient_id": patient_id, "tumor_voxels": tumor_voxels, "tumor_volume_mm3": volume_mm3})
+
+    df = pd.DataFrame(volume_data)
+    df.to_csv("tumor_volumes.csv", index=False)
+    print("Tumor volume extraction complete. Saved to tumor_volumes.csv")
+
+import os
+import numpy as np
+import torch
+import nibabel as nib
+from scipy.stats import skew, kurtosis
+from skimage.feature import graycomatrix, graycoprops
+from monai.networks.nets import UNETR # type: ignore
+from gym import spaces
+import gym
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+vit_segmenter = UNETR(
+    in_channels=4,
+    out_channels=4,
+    img_size=(128, 128, 128),
+    feature_size=16,
+    hidden_size=768,
+    mlp_dim=3072,
+    num_heads=12,
+    pos_embed='perceptron',
+    norm_name='instance',
+    res_block=True,
+    dropout_rate=0.0
+).to(device)
+
+vit_segmenter.load_state_dict(torch.load("unetr_checkpoint.pth"))
+vit_segmenter.eval()
+
+class TumorGrowthEnv(gym.Env):
+    def __init__(self, volume_df, brats_data_dir):
+        super().__init__()
+        self.volume_df = volume_df
+        self.brats_data_dir = brats_data_dir
+        self.feature_dim = 32
+        self.action_space = spaces.Discrete(3)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(6 + self.feature_dim,), dtype=np.float32)
+        self.max_steps = 20
+
+    def _load_real_features(self, patient_id):
+        return extract_features_for_patient(os.path.join(self.brats_data_dir, patient_id))
+
+    def reset(self):
+        self.steps = 0
+        self.done = False
+        self.delta = 0.0
+        self.prev_size = 0.3
+        sample = self.volume_df.sample(1).iloc[0]
+        self.patient_id = sample['patient_id']
+        self.tumor_volume = sample['tumor_volume_mm3']
+        self.age = sample.get('age', 50)
+        self.sex = sample.get('sex', 1)
+        max_volume = self.volume_df['tumor_volume_mm3'].max()
+        self.norm_volume = self.tumor_volume / max_volume if max_volume > 0 else 0.0
+        self.age_norm = (self.age - 40) / 40
+        self.sex_norm = float(self.sex)
+        self.tumor_features = self._load_real_features(self.patient_id)
+        self.current_size = 0.3
+        self.growth_rate = np.clip(np.random.normal(0.07, 0.015), 0.03, 0.1)
+        self.decay_rate = np.clip(np.random.normal(0.03, 0.01), 0.01, 0.05)
+        state = np.concatenate(([self.current_size, self.delta, self.norm_volume, self.growth_rate, self.age_norm, self.sex_norm], self.tumor_features))
+        return state
+
+    def step(self, action):
+        noise = np.random.normal(0, 0.02)
+        if action == 0:
+            self.current_size = min(1.0, self.current_size * (1 + self.growth_rate + noise))
+            reward = -self.current_size
+        elif action == 1:
+            self.current_size = max(0.0, self.current_size * (1 - self.decay_rate + noise))
+            reward = -self.current_size - 0.05
+        else:
+            self.current_size = max(0.0, self.current_size * (1 - 2 * self.decay_rate + noise))
+            reward = -self.current_size - 0.15
+        self.steps += 1
+        self.delta = self.current_size - self.prev_size
+        self.prev_size = self.current_size
+        self.done = self.current_size < 0.01 or self.steps >= self.max_steps
+        state = np.concatenate(([self.current_size, self.delta, self.norm_volume, self.growth_rate, self.age_norm, self.sex_norm], self.tumor_features))
+        return state, reward, self.done, {}
+
+def compute_dice(pred, target, num_classes=4, smooth=1e-5):
+    dice_scores = []
+    for c in range(1, num_classes):
+        pred_c = (pred == c).astype(np.uint8)
+        target_c = (target == c).astype(np.uint8)
+        intersection = np.sum(pred_c * target_c)
+        union = np.sum(pred_c) + np.sum(target_c)
+        dice = (2. * intersection + smooth) / (union + smooth)
+        dice_scores.append(dice)
+    return np.array(dice_scores), np.mean(dice_scores)
+
+def extract_features_for_patient(patient_dir):
+    vit_segmenter.train()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    vit_segmenter.to(device)
+    modalities = {"t1": None, "t1ce": None, "t2": None, "flair": None}
+    gt_seg = None
+    for file in os.listdir(patient_dir):
+        fpath = os.path.join(patient_dir, file)
+        if file.endswith(".nii.gz"):
+            lname = file.lower()
+            if "seg" in lname:
+                gt_seg = nib.load(fpath).get_fdata()
+            elif "t1ce" in lname:
+                modalities["t1ce"] = nib.load(fpath).get_fdata()
+            elif "t1" in lname and "t1ce" not in lname:
+                modalities["t1"] = nib.load(fpath).get_fdata()
+            elif "t2" in lname:
+                modalities["t2"] = nib.load(fpath).get_fdata()
+            elif "flair" in lname:
+                modalities["flair"] = nib.load(fpath).get_fdata()
+    if any(v is None for v in modalities.values()):
+        return np.zeros(32, dtype=np.float32)
+    volume = np.stack([modalities["t1"], modalities["t1ce"], modalities["t2"], modalities["flair"]], axis=0)
+    volume_tensor = torch.tensor(volume, dtype=torch.float32).unsqueeze(0).to(device)
+    seg_output = vit_segmenter(volume_tensor)
+    predicted_mask = torch.argmax(seg_output, dim=1).squeeze(0).cpu().detach().numpy()
+    if gt_seg is not None and gt_seg.shape == predicted_mask.shape:
+        dice_per_class, mean_dice = compute_dice(predicted_mask, gt_seg)
+    tumor_mask = predicted_mask > 0
+    if np.sum(tumor_mask) == 0:
+        return np.zeros(32, dtype=np.float32)
+    features = []
+    for mod_name in ["t1", "t1ce", "t2", "flair"]:
+        img = modalities[mod_name]
+        tumor_region = img[tumor_mask]
+        mean_intensity = tumor_region.mean()
+        std_intensity = tumor_region.std()
+        skew_intensity = skew(tumor_region)
+        kurt_intensity = kurtosis(tumor_region)
+        tumor_region_scaled = ((tumor_region - tumor_region.min()) / (tumor_region.max() - tumor_region.min()) * 255).astype(np.uint8)
+        if len(tumor_region_scaled) < 10:
+            contrast = correlation = energy = homogeneity = 0.0
+        else:
+            glcm = graycomatrix(tumor_region_scaled.reshape(-1, 1), distances=[1], angles=[0], levels=256, symmetric=True, normed=True)
+            contrast = graycoprops(glcm, 'contrast')[0, 0]
+            correlation = graycoprops(glcm, 'correlation')[0, 0]
+            energy = graycoprops(glcm, 'energy')[0, 0]
+            homogeneity = graycoprops(glcm, 'homogeneity')[0, 0]
+        features.extend([mean_intensity, std_intensity, skew_intensity, kurt_intensity, contrast, correlation, energy, homogeneity])
+    return np.array(features, dtype=np.float32)
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import random
+import math
+from collections import deque
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from torch.utils.tensorboard import SummaryWriter
+
+class NoisyLinear(nn.Module):
+    def __init__(self, in_features, out_features, sigma_init=0.5):
+        super(NoisyLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
+        self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
+        self.register_buffer("weight_epsilon", torch.empty(out_features, in_features))
+
+        self.bias_mu = nn.Parameter(torch.empty(out_features))
+        self.bias_sigma = nn.Parameter(torch.empty(out_features))
+        self.register_buffer("bias_epsilon", torch.empty(out_features))
+
+        self.sigma_init = sigma_init
+        self.reset_parameters()
+        self.reset_noise()
+
+    def reset_parameters(self):
+        mu_range = 1 / math.sqrt(self.in_features)
+        self.weight_mu.data.uniform_(-mu_range, mu_range)
+        self.weight_sigma.data.fill_(self.sigma_init * mu_range)
+        self.bias_mu.data.uniform_(-mu_range, mu_range)
+        self.bias_sigma.data.fill_(self.sigma_init * mu_range)
+
+    def reset_noise(self):
+        epsilon_in = self._f(self.in_features)
+        epsilon_out = self._f(self.out_features)
+        self.weight_epsilon.copy_(epsilon_out.ger(epsilon_in))
+        self.bias_epsilon.copy_(epsilon_out)
+
+    def _f(self, size):
+        x = torch.randn(size)
+        return x.sign() * x.abs().sqrt()
+
+    def forward(self, input):
+        if self.training:
+            weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
+            bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
+        else:
+            weight = self.weight_mu
+            bias = self.bias_mu
+        return nn.functional.linear(input, weight, bias)
+
+class DQN(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super(DQN, self).__init__()
+        self.feature = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU()
+        )
+        self.advantage = nn.Sequential(
+            NoisyLinear(128, 128),
+            nn.ReLU(),
+            NoisyLinear(128, output_dim)
+        )
+        self.value = nn.Sequential(
+            NoisyLinear(128, 128),
+            nn.ReLU(),
+            NoisyLinear(128, 1)
+        )
+
+    def forward(self, x):
+        x = self.feature(x)
+        adv = self.advantage(x)
+        val = self.value(x)
+        return val + adv - adv.mean(dim=1, keepdim=True)
+
+    def reset_noise(self):
+        for module in self.modules():
+            if isinstance(module, NoisyLinear):
+                module.reset_noise()
+
+class PrioritizedReplayBuffer:
+    def __init__(self, capacity=10000, alpha=0.6):
+        self.capacity = capacity
+        self.buffer = []
+        self.pos = 0
+        self.priorities = np.zeros((capacity,), dtype=np.float32)
+        self.alpha = alpha
+
+    def push(self, state, action, reward, next_state, done):
+        max_priority = self.priorities.max() if self.buffer else 1.0
+        if len(self.buffer) < self.capacity:
+            self.buffer.append((state, action, reward, next_state, done))
+        else:
+            self.buffer[self.pos] = (state, action, reward, next_state, done)
+        self.priorities[self.pos] = max_priority
+        self.pos = (self.pos + 1) % self.capacity
+
+    def sample(self, batch_size, beta=0.4):
+        if len(self.buffer) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:len(self.buffer)]
+        probs = prios ** self.alpha
+        probs /= probs.sum()
+
+        indices = np.random.choice(len(self.buffer), batch_size, p=probs)
+        samples = [self.buffer[idx] for idx in indices]
+
+        total = len(self.buffer)
+        weights = (total * probs[indices]) ** (-beta)
+        weights /= weights.max()
+        weights = torch.tensor(weights, dtype=torch.float32)
+
+        batch = list(zip(*samples))
+        states = torch.tensor(np.array(batch[0]), dtype=torch.float32)
+        actions = torch.tensor(batch[1], dtype=torch.int64)
+        rewards = torch.tensor(batch[2], dtype=torch.float32)
+        next_states = torch.tensor(np.array(batch[3]), dtype=torch.float32)
+        dones = torch.tensor(batch[4], dtype=torch.float32)
+
+        return states, actions, rewards, next_states, dones, weights, indices
+
+    def update_priorities(self, indices, priorities):
+        for idx, priority in zip(indices, priorities):
+            self.priorities[idx] = priority
+def train_double_dqn(env, episodes=500, batch_size=64, gamma=0.99, lr=1e-3, target_update_tau=0.005, max_grad_norm=10, alpha=0.6, beta_start=0.4):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    policy_net = DQN(env.observation_space.shape[0], env.action_space.n).to(device)
+    target_net = DQN(env.observation_space.shape[0], env.action_space.n).to(device)
+    target_net.load_state_dict(policy_net.state_dict())
+    target_net.eval()
+    optimizer = optim.Adam(list(policy_net.parameters()) + list(vit_segmenter.parameters()), lr=lr)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.9)
+    replay_buffer = PrioritizedReplayBuffer(alpha=alpha)
+    rewards_all = []
+    steps_done = 0
+    writer = SummaryWriter()
+    for episode in tqdm(range(episodes)):
+        state = env.reset()
+        total_reward = 0
+        done = False
+        beta = min(1.0, beta_start + episode * (1.0 - beta_start) / episodes)
+        while not done:
+            with torch.no_grad():
+                state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
+                action = policy_net(state_tensor).max(1)[1].item()
+            next_state, reward, done, _ = env.step(action)
+            replay_buffer.push(state, action, reward, next_state, done)
+            state = next_state
+            total_reward += reward
+            if len(replay_buffer.buffer) >= batch_size:
+                s, a, r, s1, d, weights, indices = replay_buffer.sample(batch_size, beta=beta)
+                s, a, r, s1, d, weights = s.to(device), a.to(device), r.to(device), s1.to(device), d.to(device), weights.to(device)
+                with torch.no_grad():
+                    next_actions = policy_net(s1).max(1)[1].unsqueeze(1)
+                    next_q_vals = target_net(s1).gather(1, next_actions).squeeze(1)
+                    target_q = r + gamma * next_q_vals * (1 - d)
+                q_vals = policy_net(s).gather(1, a.unsqueeze(1)).squeeze(1)
+                td_errors = (q_vals - target_q).abs().detach().cpu().numpy()
+                replay_buffer.update_priorities(indices, td_errors + 1e-6)
+                loss = (nn.SmoothL1Loss(reduction='none')(q_vals, target_q.detach()) * weights).mean()
+                optimizer.zero_grad()
+                loss.backward()
+                nn.utils.clip_grad_norm_(list(policy_net.parameters()) + list(vit_segmenter.parameters()), max_grad_norm)
+                optimizer.step()
+                scheduler.step()
+                for target_param, param in zip(target_net.parameters(), policy_net.parameters()):
+                    target_param.data.copy_(target_update_tau * param.data + (1.0 - target_update_tau) * target_param.data)
+                writer.add_scalar("Loss", loss.item(), steps_done)
+                steps_done += 1
+        rewards_all.append(total_reward)
+        writer.add_scalar("Reward", total_reward, episode)
+    writer.close()
+    plt.plot(rewards_all)
+    plt.xlabel("Episode")
+    plt.ylabel("Total Reward")
+    plt.title("Training Rewards Over Episodes")
+    plt.grid(True)
+    plt.show()
+    return policy_net
+
+if __name__ == "__main__":
+    root_data_dir = "C:/Users/rohan/OneDrive/Desktop/MICCAI2024-BraTS-GoAT-TrainingData-With-GroundTruth-003/MICCAI2024-BraTS-GoAT-TrainingData-With-GroundTruth"
+    volume_df = pd.read_csv("tumor_volumes.csv")
+    env = TumorGrowthEnv(volume_df, root_data_dir)
+    trained_policy = train_double_dqn(env)
